@@ -96,6 +96,19 @@ def create_app(config=None, config_path=None):
             expose_headers=["*"],
             allow_headers="*"
         )
+
+        # Ensure CORS headers on every Lambda response (belt-and-suspenders for API Gateway / preflight)
+        _cors_origins = set(origins)
+
+        @app.after_request
+        def _add_cors_headers(response):
+            origin = request.environ.get("HTTP_ORIGIN")
+            if origin and origin in _cors_origins:
+                response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, Accept"
+            response.headers["Access-Control-Expose-Headers"] = "*"
+            return response
     else:
         app.logger.info('RUNNING ON LOCAL ENVIRONMENT')
         CORS(app, resources={r"/*": {
