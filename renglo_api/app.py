@@ -118,6 +118,7 @@ def create_app(config=None, config_path=None):
     from renglo_api.routes.schd_routes import app_schd
     from renglo_api.routes.chat_routes import app_chat
     from renglo_api.routes.state_routes import app_state
+    from renglo_api.routes.session_routes import app_session
 
     app.register_blueprint(app_data)
     app.register_blueprint(app_search)
@@ -127,6 +128,7 @@ def create_app(config=None, config_path=None):
     app.register_blueprint(app_schd)
     app.register_blueprint(app_chat)
     app.register_blueprint(app_state)
+    app.register_blueprint(app_session)
     
     # Template Filters
     @app.template_filter()

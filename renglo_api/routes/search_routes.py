@@ -22,8 +22,7 @@ def on_load(state):
 @cognito_auth_required
 def route_search(portfolio, org):
     """
-    Full-text search within tenant (org) scope.
-    tenant_id = org. Never returns cross-tenant results.
+    Full-text search within org scope. Never returns cross-org results.
     """
     payload = request.get_json() or {}
     query = payload.get('query', '')
@@ -31,13 +30,17 @@ def route_search(portfolio, org):
     filters = payload.get('filters')
     limit = min(int(payload.get('limit', 20)), 100)
     offset = int(payload.get('offset', 0))
+    search_fields = payload.get('search_fields')
+    boost_fields = payload.get('boost_fields')
 
     result = SHC.search(
-        tenant_id=org,
+        org=org,
         query=query,
         datatypes=datatypes,
         filters=filters,
         limit=limit,
         offset=offset,
+        search_fields=search_fields,
+        boost_fields=boost_fields,
     )
     return jsonify(result), 200 if result.get('success') else 500
