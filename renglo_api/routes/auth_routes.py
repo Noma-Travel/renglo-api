@@ -51,6 +51,10 @@ def authorization_check(app_id,action,entity_id=''):
             }
 
 
+def _auth_forbidden():
+    """Never return bare False from a route — it breaks the WSGI handler."""
+    return jsonify({"success": False, "message": "Unauthorized", "status": 403}), 403
+
 
 @app_auth.route('/', methods=['GET'])
 @cognito_auth_required
@@ -173,7 +177,7 @@ def get_user_token():
     '''
     
     if not authorization_check('_auth','getJWT'):
-        return False
+        return _auth_forbidden()
 
     # Get the raw JWT token from the Authorization header
     auth_header = request.headers.get('Authorization')
@@ -193,7 +197,7 @@ def get_user():
     '''
 
     if not authorization_check('_auth','getOwnUser'):
-        return False
+        return _auth_forbidden()
 
     if "cognito:username" in current_cognito_jwt:
         # IdToken was used
@@ -234,7 +238,7 @@ def update_user():
 
     #AUTH-CHECK
     if not authorization_check('_auth','modifyOwnUser'):
-        return False
+        return _auth_forbidden()
     
     if "cognito:username" in current_cognito_jwt:
         # IdToken was used
@@ -303,32 +307,55 @@ def get_tree():
 
     #AUTH-CHECK
     if not authorization_check('_auth','ListOwnTree'):
-        return False
+        return _auth_forbidden()
     
     data = {}
     data['user_id'] = get_current_user()
-    
-    # Check if the document already exists in the S3 bucket
+
+    # Local dev: always build from DynamoDB (avoids stale S3 cache and S3 misconfig).
+    if not current_app.config.get('IS_LAMBDA', False):
+        response = AUC.get_tree_full(**data)
+        if response.get('success'):
+            return jsonify(response['document']), response['status']
+        return jsonify(response), response['status']
+
     s3_client = boto3.client('s3')
-    bucket_name = current_app.config['S3_BUCKET_NAME']  
+    bucket_name = current_app.config.get('S3_BUCKET_NAME')
     file_path = f'auth/tree/{data["user_id"]}'
-    
+
+    if not bucket_name:
+        current_app.logger.warning('S3_BUCKET_NAME not set; building tree from DB')
+        response = AUC.get_tree_full(**data)
+        if response.get('success'):
+            return jsonify(response['document']), response['status']
+        return jsonify(response), response['status']
+
     try:
         s3_client.head_object(Bucket=bucket_name, Key=file_path)
-        # If it exists, return the document from the S3 bucket
-        response = s3_client.get_object(Bucket=bucket_name, Key=file_path)
-        document = json.loads(response['Body'].read())
+        s3_obj = s3_client.get_object(Bucket=bucket_name, Key=file_path)
+        document = json.loads(s3_obj['Body'].read())
         current_app.logger.debug('Tree already exists, retrieving from S3:'+str(document))
         return jsonify(document), 200
     except s3_client.exceptions.ClientError:
-        # If it does not exist, call AUC.get_tree_full()
         current_app.logger.debug('Tree not found in s3, creating new one')
         response = AUC.get_tree_full(**data)
-        s3_client.put_object(Bucket=bucket_name, Key=file_path, Body=json.dumps(response['document']))
-    
-    if response['success']:
-        return jsonify(response['document']), response['status']
-    else:
+        if response.get('success') and response.get('document') is not None:
+            try:
+                s3_client.put_object(
+                    Bucket=bucket_name,
+                    Key=file_path,
+                    Body=json.dumps(response['document'])
+                )
+            except Exception as e:
+                current_app.logger.error(f"Failed to upload tree to S3 (continuing): {str(e)}")
+        if response.get('success'):
+            return jsonify(response['document']), response['status']
+        return jsonify(response), response['status']
+    except Exception as e:
+        current_app.logger.error(f"Unexpected error reading tree from S3 (falling back to DB): {str(e)}")
+        response = AUC.get_tree_full(**data)
+        if response.get('success'):
+            return jsonify(response['document']), response['status']
         return jsonify(response), response['status']
     
 
@@ -340,7 +367,7 @@ def list_portfolio():
 
     #AUTH-CHECK
     if not authorization_check('_auth','ListOwnPortfolio'):
-        return False
+        return _auth_forbidden()
     
     data = {}
     data['user_id'] = get_current_user()
@@ -388,7 +415,7 @@ def get_portfolio(portfolio_id):
 
     #AUTH-CHECK
     if not authorization_check('_auth','getPortfolio',entity_id=portfolio_id):
-        return False
+        return _auth_forbidden()
     
     data = {}
     data['portfolio_id'] = portfolio_id
@@ -451,7 +478,7 @@ def get_org(portfolio_org_id):
 
     #AUTH-CHECK
     if not authorization_check('_auth','getOrg',entity_id=portfolio_org_id):
-        return False
+        return _auth_forbidden()
     
 
     data = {}
@@ -610,7 +637,7 @@ def get_team(portfolio_team_id):
 
     #AUTH-CHECK
     if not authorization_check('_auth','getTeam',entity_id=portfolio_team_id):
-        return False
+        return _auth_forbidden()
     
 
     data = {}
@@ -697,7 +724,7 @@ def get_team_users(team_id):
 
     #AUTH-CHECK
     if not authorization_check('_auth','getTeamUsers',entity_id=team_id):
-        return False
+        return _auth_forbidden()
     
 
     data = {}
@@ -830,7 +857,7 @@ def get_tool(portfolio_id,tool_id):
     
     #AUTH-CHECK
     if not authorization_check('_auth','getTool',entity_id=tool_id):
-        return False
+        return _auth_forbidden()
     
     data = {}
     data['portfolio_id'] = portfolio_id
