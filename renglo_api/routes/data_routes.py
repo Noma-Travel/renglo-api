@@ -59,10 +59,12 @@ def route_a_b_get(portfolio, org, ring):
     sort = request.args.get('sort')  # Retrieve sort, default to None
     all = request.args.get('all')
     refresh = request.args.get('refresh')  # Check for refresh parameter
+    # When paged=1, list from DynamoDB in pages (first page has no lastkey) instead of the S3 snapshot.
+    paged = request.args.get('paged') == '1'
 
     response = []
     
-    if not lastkey:
+    if not lastkey and not paged:
         # If you are not using pagination, use the cache
         all = True
     
