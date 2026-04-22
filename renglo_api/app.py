@@ -143,6 +143,25 @@ def create_app(config=None, config_path=None):
     app.register_blueprint(app_chat)
     app.register_blueprint(app_state)
     app.register_blueprint(app_session)
+    # Backward-compat aliases: support routes both with and without "_" prefixes.
+    # This prevents frontend/backend drift (e.g. /data vs /_data) from causing
+    # API Gateway 404 preflight failures that surface as CORS errors in browsers.
+    def _register_alias(blueprint, alias_prefix):
+        app.register_blueprint(
+            blueprint,
+            url_prefix=alias_prefix,
+            name=f'{blueprint.name}_alias_{alias_prefix.strip("/").replace("/", "_")}'
+        )
+
+    _register_alias(app_data, '/data')
+    _register_alias(app_auth, '/auth')
+    _register_alias(app_search, '/search')
+    _register_alias(app_blueprint, '/blueprint')
+    _register_alias(app_docs, '/docs')
+    _register_alias(app_schd, '/schd')
+    _register_alias(app_chat, '/chat')
+    _register_alias(app_state, '/state')
+    _register_alias(app_session, '/session')
     
     # Template Filters
     @app.template_filter()
@@ -217,4 +236,3 @@ def run(host='0.0.0.0', port=5000, debug=True):
 
 # For Zappa deployment - create app instance at module level
 app = create_app()
-
