@@ -32,10 +32,11 @@ def create_app(config=None, config_path=None):
         # Option 3: Load from specific path
         app = create_app(config_path='/path/to/env_config.py')
     """
-    # Define the WSGI application object
+    # static_url_path must not be '/': a root catch-all <path:filename> would match
+    # every path (e.g. /_docs/...), miss the file, 404, and the global 404 handler would run.
     app = Flask(__name__, 
                 static_folder='../static/dist',
-                static_url_path='/')
+                static_url_path='/_st')
     
     # Load environment-specific config if not provided directly
     if config is None:
@@ -146,11 +147,11 @@ def create_app(config=None, config_path=None):
     def is_list(val):
         return isinstance(val, list)
     
-    # Error handler for 404
+    # Unmatched route / true 404 — do not return 301 (bad for APIs and browser caching).
     @app.errorhandler(404)
     def not_found(error):
         renglo_fe_url = app.config.get('FE_BASE_URL', '')
-        return jsonify({'error': f'Static site has moved, go to: {renglo_fe_url}'}), 301
+        return jsonify({'error': f'Not found. FE: {renglo_fe_url}'}), 404
     
     # Basic routes
     @app.route('/')

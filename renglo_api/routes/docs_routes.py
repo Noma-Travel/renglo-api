@@ -57,7 +57,7 @@ def upload_doc_to_s3(portfolio, org, ring, raw_doc, type):
         'application/pdf': 'application/pdf',
         'text/plain': 'text/plain',
         'text/csv': 'text/csv'
-    }.get(type, 'application/octet-stream')  # Default to application/octet-stream if not found
+    }.get(type, 'application/octet-stream')  # Default to 'application/octet-stream' if not found
 
     # Upload to S3 with the specified content type
     response = s3_client.put_object(
@@ -77,7 +77,6 @@ def upload_doc_to_s3(portfolio, org, ring, raw_doc, type):
         return result
     
     return jsonify({'success': False})
-
 
 
 
@@ -122,7 +121,25 @@ def route_a_b_post(portfolio,org,ring):
     return jsonify(success=False, message='Invalid file'), 400
 
 
-# GET A DOCUMENT FROM S3
+# GET a transient JSON document (S3 tmp: portfolio / org / entity / YYYY-MM-DD / object_id)
+@app_docs.route(
+    '/<string:portfolio>/<string:org>/<string:entity>/<string:date>/<string:object_id>',
+    methods=['GET'],
+)
+def route_tmp_artifact_get(portfolio, org, entity, date, object_id):
+    response = DCC.tmp_get(portfolio, org, entity, date, object_id)
+    if not response['success']:
+        return (
+            jsonify(
+                success=False,
+                error=response.get('error', 'File not found'),
+            ),
+            404,
+        )
+    return response['content'], 200
+
+
+# GET A DOCUMENT FROM S3 (4-tuple: portfolio / org / ring / filename)
 @app_docs.route('/<string:portfolio>/<string:org>/<string:ring>/<string:filename>', methods=['GET'])
 def route_a_b_c_get(portfolio,org,ring,filename):
     
@@ -137,18 +154,12 @@ def route_a_b_c_get(portfolio,org,ring,filename):
         with open(default_image_path, 'rb') as default_image:
             content = default_image.read()
             response_2 = make_response(content)
-            response_2.headers.set('Content-Type', 'image/png')  # Set the correct content type for the image
+            response_2.headers.set('Content-Type', 'image/png')  # Set the content type for the default image
             return response_2, 200  # Return the default image with a 200 status code
     
     return response['content'], 200
-    
-    
 
 
-    
-
-
- 
 # DELETE A DOCUMENT IN S3 (NOT IMPLEMENTED)
 @app_docs.route('/<string:portfolio>/<string:org>/<string:ring>/<string:filename>', methods=['DELETE'])
 @cognito_auth_required

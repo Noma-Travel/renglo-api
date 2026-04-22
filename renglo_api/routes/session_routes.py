@@ -221,7 +221,10 @@ def session_messages(portfolio,org,entity_type,entity_id,thread_id):
     # Authorization validation should be implemented here. Check if token is authorized to access portfolio/org
     
     if request.method == 'GET':
-        response = SSC.list_turns(portfolio,org,entity_type,entity_id,thread_id)  
+        # resolve=True: inline tmp artifacts for UI; agent/triage code must use SSC.list_turns(..., False)
+        response = SSC.list_turns(portfolio,org,entity_type,entity_id,thread_id,True) 
+        
+     
 
         
     return response

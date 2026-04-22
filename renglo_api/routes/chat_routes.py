@@ -221,9 +221,9 @@ def chat_messages(portfolio,org,entity_type,entity_id,thread_id):
     # Authorization validation should be implemented here. Check if token is authorized to access portfolio/org
     
     if request.method == 'GET':
-        response = CHC.list_turns(portfolio,org,entity_type,entity_id,thread_id)  
+        # resolve=True: inline tmp artifacts for UI; agent/triage code must use CHC.list_turns(..., False)
+        response = CHC.list_turns(portfolio, org, entity_type, entity_id, thread_id, True)
 
-        
     return response
 
 
