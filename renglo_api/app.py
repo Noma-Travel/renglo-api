@@ -97,13 +97,27 @@ def create_app(config=None, config_path=None):
             expose_headers=["*"],
             allow_headers="*"
         )
+
+        # Ensure CORS headers on every Lambda response (belt-and-suspenders for API Gateway / preflight)
+        _cors_origins = set(origins)
+
+        @app.after_request
+        def _add_cors_headers(response):
+            origin = request.environ.get("HTTP_ORIGIN")
+            if origin and origin in _cors_origins:
+                response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, Accept"
+            response.headers["Access-Control-Expose-Headers"] = "*"
+            return response
     else:
         app.logger.info('RUNNING ON LOCAL ENVIRONMENT')
         CORS(app, resources={r"/*": {
             "origins": [
                 "http://127.0.0.1:5173",
                 "http://127.0.0.1:5174",
-                "http://127.0.0.1:3000"
+                "http://127.0.0.1:3000",
+                "http://localhost:3000",
             ]
         }})
     
@@ -130,6 +144,25 @@ def create_app(config=None, config_path=None):
     app.register_blueprint(app_chat)
     app.register_blueprint(app_state)
     app.register_blueprint(app_session)
+    # Backward-compat aliases: support routes both with and without "_" prefixes.
+    # This prevents frontend/backend drift (e.g. /data vs /_data) from causing
+    # API Gateway 404 preflight failures that surface as CORS errors in browsers.
+    def _register_alias(blueprint, alias_prefix):
+        app.register_blueprint(
+            blueprint,
+            url_prefix=alias_prefix,
+            name=f'{blueprint.name}_alias_{alias_prefix.strip("/").replace("/", "_")}'
+        )
+
+    _register_alias(app_data, '/data')
+    _register_alias(app_auth, '/auth')
+    _register_alias(app_search, '/search')
+    _register_alias(app_blueprint, '/blueprint')
+    _register_alias(app_docs, '/docs')
+    _register_alias(app_schd, '/schd')
+    _register_alias(app_chat, '/chat')
+    _register_alias(app_state, '/state')
+    _register_alias(app_session, '/session')
     
     # Template Filters
     @app.template_filter()
@@ -204,4 +237,3 @@ def run(host='0.0.0.0', port=5000, debug=True):
 
 # For Zappa deployment - create app instance at module level
 app = create_app()
-

@@ -53,14 +53,18 @@ def socket_auth_required(f):
             if not payload or 'auth' not in payload:
                 error_msg= "Missing payload or auth token in request"
                 current_app.logger.error(error_msg)
-                CHC.error_chat(error_msg,payload['connection_id'])
+                cid = (payload or {}).get('connectionId') or (payload or {}).get('connection_id')
+                if cid:
+                    CHC.error_chat(error_msg, cid)
                 return jsonify({'error': error_msg}), 401
             
             auth_token = payload['auth']
             if not isinstance(auth_token, str):
                 error_msg= "Invalid auth token format"
                 current_app.logger.error(error_msg)
-                CHC.error_chat(error_msg,payload['connection_id'])
+                cid = payload.get('connectionId') or payload.get('connection_id')
+                if cid:
+                    CHC.error_chat(error_msg, cid)
                 return jsonify({'error': error_msg}), 401
 
             # Set the token in the request headers for cognito authentication
@@ -69,7 +73,9 @@ def socket_auth_required(f):
                     cognito_auth_required(lambda: None)()
                 except Exception as cognito_error:
                     current_app.logger.error(f"Cognito authentication failed: {str(cognito_error)}")
-                    CHC.error_chat(str(cognito_error),payload['connection_id'])
+                    cid = payload.get('connectionId') or payload.get('connection_id')
+                    if cid:
+                        CHC.error_chat(str(cognito_error), cid)
                     return jsonify({'error': 'Invalid or expired authentication token'}), 401
 
             current_app.logger.info("Socket authentication successful")

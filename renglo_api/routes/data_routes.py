@@ -87,7 +87,27 @@ def route_a_b_get(portfolio, org, ring):
                 return jsonify(document), 200
         except (s3_client.exceptions.ClientError, Exception) as e:
             # If it does not exist or if we raised an exception, call DAC.get_a_b()
-            DAC.refresh_s3_cache(portfolio, org, ring, sort)
+            current_app.logger.warning(
+                'Falling back to cache refresh for %s due to %s',
+                file_path,
+                str(e)
+            )
+            try:
+                # Keep return shape consistent with the S3 document path.
+                refreshed, _status = DAC.refresh_s3_cache(portfolio, org, ring, sort)
+                return jsonify(refreshed), 200
+            except Exception as refresh_error:
+                current_app.logger.exception(
+                    'Failed to refresh cache for %s/%s/%s',
+                    portfolio,
+                    org,
+                    ring
+                )
+                return jsonify({
+                    'success': False,
+                    'message': 'Failed to fetch data',
+                    'error': str(refresh_error)
+                }), 500
         
     else:
         response = DAC.get_a_b(portfolio, org, ring, limit, lastkey, sort)
