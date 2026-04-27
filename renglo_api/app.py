@@ -179,6 +179,16 @@ def create_app(config=None, config_path=None):
         # duplicates Access-Control-* and API clients/Gateway may keep the narrower header only.
         if allowed_set:
             _install_cors_wsgi_middleware(app, frozenset(allowed_set))
+        # API Gateway + stage (e.g. /noma_prod/...) must be stripped or Flask routes
+        # registered at /_schd, /_data, etc. will 404. See renglo_api.apigw_stage_middleware.
+        pfx = (app.config.get("URL_PREFIX") or os.environ.get("URL_PREFIX") or "").strip().strip(
+            "/"
+        )
+        if pfx:
+            from renglo_api.apigw_stage_middleware import strip_url_prefix
+
+            app.wsgi_app = strip_url_prefix(app.wsgi_app, url_prefix=pfx)
+            app.logger.info("APIGW: URL_PREFIX strip active for /%s (PATH_INFO for Flask routes)", pfx)
     else:
         app.logger.info('RUNNING ON LOCAL ENVIRONMENT')
         CORS(app, resources={r"/*": {
