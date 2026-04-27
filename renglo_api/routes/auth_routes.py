@@ -1,6 +1,7 @@
 #app_auth.py
 from flask import Flask, redirect, request, session, url_for,Blueprint, jsonify, current_app
 from renglo.common import *
+import os
 import re
 import json
 import boto3
@@ -29,15 +30,18 @@ def on_load(state):
 
 # WILL DEPRECATE : Use the get_current_user() in auth_controller instead
 def get_current_user():
-
-    if "cognito:username" in current_cognito_jwt:
-        # IdToken was used
-        user_id = create_md5_hash(current_cognito_jwt["cognito:username"],9)
-    else:
-        # AccessToken was used
-        user_id = create_md5_hash(current_cognito_jwt["username"],9)
-
-    return user_id
+    # Prefer Cognito "sub" (stable user UUID). Fallback to legacy claims.
+    # This avoids identity drift when username aliases (email) differ from UUID.
+    claim_candidates = (
+        current_cognito_jwt.get("sub"),
+        current_cognito_jwt.get("cognito:username"),
+        current_cognito_jwt.get("username"),
+        current_cognito_jwt.get("email"),
+    )
+    for claim in claim_candidates:
+        if isinstance(claim, str) and claim.strip():
+            return create_md5_hash(claim.strip(), 9)
+    return None
 
 
 def authorization_check(app_id,action,entity_id=''):
@@ -199,14 +203,7 @@ def get_user():
     if not authorization_check('_auth','getOwnUser'):
         return _auth_forbidden()
 
-    if "cognito:username" in current_cognito_jwt:
-        # IdToken was used
-        #current_app.logger.debug(current_cognito_jwt["cognito:username"])
-        user_id = create_md5_hash(current_cognito_jwt["cognito:username"],9)
-    else:
-        # AccessToken was used
-        #current_app.logger.debug(current_cognito_jwt["username"])
-        user_id = create_md5_hash(current_cognito_jwt["username"],9)
+    user_id = get_current_user()
 
     #current_app.logger.debug(current_cognito_jwt)
     data = {}
@@ -240,18 +237,9 @@ def update_user():
     if not authorization_check('_auth','modifyOwnUser'):
         return _auth_forbidden()
     
-    if "cognito:username" in current_cognito_jwt:
-        # IdToken was used
-        #current_app.logger.debug(current_cognito_jwt["cognito:username"])
-        user_id = create_md5_hash(current_cognito_jwt["cognito:username"],9)
-        name = current_cognito_jwt.get("given_name", "")
-        last = current_cognito_jwt.get("family_name", "")
-    else:
-        # AccessToken was used
-        #current_app.logger.debug(current_cognito_jwt["username"])
-        user_id = create_md5_hash(current_cognito_jwt["username"],9)
-        name = ''
-        last = ''
+    user_id = get_current_user()
+    name = current_cognito_jwt.get("given_name", "")
+    last = current_cognito_jwt.get("family_name", "")
     
     data = {}
     #We don't acquire the user_id from the request or the url. Instead we will get it from the AccessToken
@@ -312,29 +300,51 @@ def get_tree():
     data = {}
     data['user_id'] = get_current_user()
 
-    # Local dev: always build from DynamoDB (avoids stale S3 cache and S3 misconfig).
-    if not current_app.config.get('IS_LAMBDA', False):
+    def _tree_response_from_db():
         response = AUC.get_tree_full(**data)
         if response.get('success'):
             return jsonify(response['document']), response['status']
         return jsonify(response), response['status']
 
+    # DynamoDB-only rebuild (optional). Use when debugging rel data or avoiding S3.
+    force_db = os.environ.get('FORCE_TREE_FROM_DB', '').strip().lower() in ('1', 'true', 'yes')
+    if force_db:
+        current_app.logger.debug('FORCE_TREE_FROM_DB: building tree from DynamoDB only')
+        return _tree_response_from_db()
+
+    # Match deployed Lambda: prefer cached tree in S3 so local dev sees the same auth tree as production.
     s3_client = boto3.client('s3')
     bucket_name = current_app.config.get('S3_BUCKET_NAME')
     file_path = f'auth/tree/{data["user_id"]}'
 
     if not bucket_name:
         current_app.logger.warning('S3_BUCKET_NAME not set; building tree from DB')
-        response = AUC.get_tree_full(**data)
-        if response.get('success'):
-            return jsonify(response['document']), response['status']
-        return jsonify(response), response['status']
+        return _tree_response_from_db()
 
     try:
         s3_client.head_object(Bucket=bucket_name, Key=file_path)
         s3_obj = s3_client.get_object(Bucket=bucket_name, Key=file_path)
         document = json.loads(s3_obj['Body'].read())
         current_app.logger.debug('Tree already exists, retrieving from S3:'+str(document))
+        portfolios = document.get('portfolios')
+        if not portfolios or not isinstance(portfolios, dict) or len(portfolios) == 0:
+            current_app.logger.info(
+                'S3 auth tree has no portfolios; rebuilding from DynamoDB for user %s',
+                data['user_id'],
+            )
+            response = AUC.get_tree_full(**data)
+            if response.get('success'):
+                doc = response['document']
+                try:
+                    s3_client.put_object(
+                        Bucket=bucket_name,
+                        Key=file_path,
+                        Body=json.dumps(doc),
+                    )
+                except Exception as e:
+                    current_app.logger.error(f"Failed to refresh stale empty tree in S3: {str(e)}")
+                return jsonify(doc), response['status']
+            return jsonify(response), response['status']
         return jsonify(document), 200
     except s3_client.exceptions.ClientError:
         current_app.logger.debug('Tree not found in s3, creating new one')

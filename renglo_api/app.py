@@ -13,6 +13,92 @@ import sys
 from renglo_api.config import load_env_config
 
 
+def _is_aws_lambda_runtime() -> bool:
+    """True inside the Lambda execution environment (Zappa, SAM, etc.)."""
+    if os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
+        return True
+    if (os.environ.get("AWS_EXECUTION_ENV") or "").startswith("AWS_Lambda"):
+        return True
+    return False
+
+
+def _collect_allowed_cors_origins(app_config: dict) -> set[str]:
+    """
+    Build the set of browser origins that may call the API. Uses FE_BASE_URL,
+    APP_FE_BASE_URL, and a comma-separated CORS_ALLOWED_ORIGINS (e.g. from zappa).
+    """
+    s: set[str] = set()
+    for k in ("FE_BASE_URL", "APP_FE_BASE_URL"):
+        v = (app_config.get(k) or os.environ.get(k) or "").strip()
+        if v:
+            s.add(v.rstrip("/"))
+    extra = (app_config.get("CORS_ALLOWED_ORIGINS") or os.environ.get("CORS_ALLOWED_ORIGINS") or "").strip()
+    if extra:
+        for p in extra.split(","):
+            p = p.strip().rstrip("/")
+            if p:
+                s.add(p)
+    return s
+
+
+def _install_cors_wsgi_middleware(app: Flask, allowed: frozenset[str]) -> None:
+    """
+    Wrap the WSGI app so every response (including automatic OPTIONS, 4xx, 5xx) gets
+    Access-Control-* headers. API Gateway (AWS_PROXY) and CloudFront will forward them.
+    Relying only on @app.after_request is brittle with some WSGI/Zappa response paths.
+    """
+    if not allowed:
+        return
+
+    parent = app.wsgi_app
+
+    def wsgi_with_cors(environ, start_response):
+        def _drop_inner_cors(name) -> bool:
+            if isinstance(name, str) and name.lower().startswith("access-control-"):
+                return False
+            if isinstance(name, (bytes, bytearray)):
+                n = name.lower()
+                if n.startswith(b"access-control-allow-") or n.startswith(
+                    b"access-control-expose-"
+                ):
+                    return False
+            return True
+
+        def start_response_cors(status, response_headers, exc_info=None):
+            # Error responses pass exc_info; still inject CORS so the browser
+            # does not report a misleading CORS failure on 5xx/exception paths.
+            try:
+                origin = (
+                    environ.get("HTTP_ORIGIN", "").strip()
+                    or (environ.get("Origin") or "").strip()
+                )
+            except Exception:
+                origin = ""
+            h = list(response_headers)
+            # Drop any CORS from inner stack (e.g. flask-cors) so we emit one consistent policy
+            h = [(k, v) for (k, v) in h if _drop_inner_cors(k)]
+            if origin and origin in allowed:
+                h.append(("Access-Control-Allow-Origin", origin))
+            h.append(
+                (
+                    "Access-Control-Allow-Methods",
+                    "GET, POST, PUT, DELETE, PATCH, OPTIONS",
+                )
+            )
+            h.append(
+                (
+                    "Access-Control-Allow-Headers",
+                    "Content-Type, Authorization, Accept, X-Api-Key, X-Amz-Date, X-Amz-Security-Token, X-Org-Id, X-Portfolio-Id, X-Requested-With, Cache-Control, Pragma, Expires, Origin",
+                )
+            )
+            h.append(("Access-Control-Expose-Headers", "*"))
+            return start_response(status, h, exc_info)
+
+        return parent(environ, start_response_cors)
+
+    app.wsgi_app = wsgi_with_cors
+
+
 def create_app(config=None, config_path=None):
     """
     Factory function to create and configure the Flask app.
@@ -58,11 +144,8 @@ def create_app(config=None, config_path=None):
     logging.getLogger('zappa').setLevel(logging.WARNING)
     app.logger.info(f'Python Version: {sys.version}')
     
-    # Determine if the app is running on AWS Lambda or locally
-    if os.getenv('AWS_LAMBDA_FUNCTION_NAME'):
-        app.config['IS_LAMBDA'] = True
-    else:
-        app.config['IS_LAMBDA'] = False
+    # Lambda: prefer runtime env; some cold paths only set AWS_EXECUTION_ENV
+    app.config['IS_LAMBDA'] = _is_aws_lambda_runtime()
     
     # Setup CORS based on environment
     if app.config['IS_LAMBDA']:
@@ -70,46 +153,32 @@ def create_app(config=None, config_path=None):
         app.logger.info('BASE_URL:' + str(app.config.get('BASE_URL', 'NOT SET')))
         app.logger.info('FE_BASE_URL:' + str(app.config.get('FE_BASE_URL', 'NOT SET')))
         
-        # Build origins list safely - PRODUCTION ONLY
-        renglo_fe_url = app.config.get('FE_BASE_URL', '').rstrip('/')
-        origins = [renglo_fe_url] if renglo_fe_url else []
-        
-        # Add APP_FE_BASE_URL if it exists in config
-        if 'APP_FE_BASE_URL' in app.config and app.config['APP_FE_BASE_URL']:
-            app.logger.info('APP_FE_BASE_URL:' + str(app.config['APP_FE_BASE_URL']))
-            origins.append(app.config['APP_FE_BASE_URL'])
+        allowed_set = _collect_allowed_cors_origins(app.config)
+        origins = list(allowed_set)
+        if not origins:
+            app.logger.error(
+                'CORS: no FE_BASE_URL / APP_FE_BASE_URL / CORS_ALLOWED_ORIGINS — browser calls will fail CORS. '
+                'Set these in zappa environment_variables (or env_config) and redeploy.'
+            )
+        else:
+            app.logger.info('CORS: APP_FE_BASE_URL: %s', app.config.get('APP_FE_BASE_URL', 'NOT SET'))
         
         # Add development origins only if explicitly enabled
         if app.config.get('ALLOW_DEV_ORIGINS', False):
             app.logger.warning('DEVELOPMENT ORIGINS ENABLED - NOT RECOMMENDED FOR PRODUCTION')
-            origins.extend([
+            for o in (
                 "http://127.0.0.1:5173",
                 "http://127.0.0.1:5174",
-                "http://127.0.0.1:3000"
-            ])
+                "http://127.0.0.1:3000",
+            ):
+                origins.append(o)
+                allowed_set.add(o)
         
-        app.logger.info(f'CORS Origins configured: {origins}')
-        CORS(
-            app,
-            resources={r"*": {"origins": origins}},
-            supports_credentials=False,
-            methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-            expose_headers=["*"],
-            allow_headers="*"
-        )
-
-        # Ensure CORS headers on every Lambda response (belt-and-suspenders for API Gateway / preflight)
-        _cors_origins = set(origins)
-
-        @app.after_request
-        def _add_cors_headers(response):
-            origin = request.environ.get("HTTP_ORIGIN")
-            if origin and origin in _cors_origins:
-                response.headers["Access-Control-Allow-Origin"] = origin
-            response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
-            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, Accept"
-            response.headers["Access-Control-Expose-Headers"] = "*"
-            return response
+        app.logger.info('CORS Origins configured: %s', origins)
+        # WSGI middleware handles all CORS for Lambda. Do not also use flask_cors.CORS: it
+        # duplicates Access-Control-* and API clients/Gateway may keep the narrower header only.
+        if allowed_set:
+            _install_cors_wsgi_middleware(app, frozenset(allowed_set))
     else:
         app.logger.info('RUNNING ON LOCAL ENVIRONMENT')
         CORS(app, resources={r"/*": {
