@@ -47,6 +47,11 @@ def create_app(config=None, config_path=None):
     
     # Make config available for controller instantiation
     app.renglo_config = dict(app.config)
+
+    # Langfuse reads from os.environ, not from app.config
+    for _lf_key in ('LANGFUSE_PUBLIC_KEY', 'LANGFUSE_SECRET_KEY', 'LANGFUSE_BASE_URL'):
+        if _lf_key in app.config and _lf_key not in os.environ:
+            os.environ[_lf_key] = str(app.config[_lf_key])
     
     # Setup cache
     cache = Cache(app)
