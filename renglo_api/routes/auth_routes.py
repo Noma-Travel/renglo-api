@@ -566,7 +566,9 @@ def create_org(portfolio_id):
         return jsonify(response), response['status']
     
     refresh_tree()
-    return jsonify(response), response['status']
+
+    status = response.get('status', 200)
+    return jsonify(response), status
 
 
 #UPDATES TREE
