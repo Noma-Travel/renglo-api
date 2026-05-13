@@ -46,13 +46,43 @@ def _install_cors_wsgi_middleware(app: Flask, allowed: frozenset[str]) -> None:
     Wrap the WSGI app so every response (including automatic OPTIONS, 4xx, 5xx) gets
     Access-Control-* headers. API Gateway (AWS_PROXY) and CloudFront will forward them.
     Relying only on @app.after_request is brittle with some WSGI/Zappa response paths.
+
+    Preflight (OPTIONS) is answered here before Flask runs. Otherwise ``cognito_auth_required``
+    may reject OPTIONS (no Authorization header), returning 401/403 without CORS — browsers
+    report that as a CORS failure.
     """
     if not allowed:
         return
 
     parent = app.wsgi_app
+    allow_headers = (
+        "Content-Type, Authorization, Accept, X-Api-Key, X-Amz-Date, X-Amz-Security-Token, "
+        "X-Org-Id, X-Portfolio-Id, X-Requested-With, Cache-Control, Pragma, Expires, Origin"
+    )
 
     def wsgi_with_cors(environ, start_response):
+        if (environ.get("REQUEST_METHOD") or "").upper() == "OPTIONS":
+            try:
+                origin = (environ.get("HTTP_ORIGIN") or "").strip()
+            except Exception:
+                origin = ""
+            if origin and origin in allowed:
+                start_response(
+                    "204 No Content",
+                    [
+                        ("Access-Control-Allow-Origin", origin),
+                        (
+                            "Access-Control-Allow-Methods",
+                            "GET, POST, PUT, DELETE, PATCH, OPTIONS",
+                        ),
+                        ("Access-Control-Allow-Headers", allow_headers),
+                        ("Access-Control-Max-Age", "86400"),
+                        ("Access-Control-Expose-Headers", "*"),
+                        ("Content-Length", "0"),
+                    ],
+                )
+                return [b""]
+
         def _drop_inner_cors(name) -> bool:
             if isinstance(name, str) and name.lower().startswith("access-control-"):
                 return False
