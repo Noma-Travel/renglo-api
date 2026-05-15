@@ -320,3 +320,20 @@ def webhook_call(portfolio,org,extension,handler):
 
 
 
+# Unauthenticated handler call that DOES return the handler response as JSON.
+# Use for handlers that gate access via their own application-layer token
+# (e.g. HMAC-signed links sent to operators via Slack). Unlike /webhook/...,
+# this preserves the JSON body so the caller can read success/output.
+@app_schd.route('/<string:portfolio>/<string:org>/public/<string:extension>/<string:handler>',methods=['POST'])
+def public_call(portfolio,org,extension,handler):
+
+    current_app.logger.info('Public handler call: '+extension+'/'+handler)
+    payload = request.get_json()
+    response = SHC.handler_call(portfolio,org,extension,handler,payload)
+
+    if not response.get('success'):
+        return jsonify(response), 400
+
+    return jsonify(response), 200
+
+
