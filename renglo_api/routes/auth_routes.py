@@ -44,10 +44,36 @@ def get_current_user():
     return None
 
 
+def _cognito_groups():
+    groups = current_cognito_jwt.get('cognito:groups')
+    if isinstance(groups, str):
+        return [groups]
+    if isinstance(groups, list):
+        return groups
+    return []
+
+
+def _user_is_global_admin(user_id):
+    return AUC.is_global_admin(cognito_groups=_cognito_groups(), user_id=user_id)
+
+
+def _build_auth_tree(user_id):
+    if _user_is_global_admin(user_id):
+        return AUC.get_tree_global_admin(user_id=user_id)
+    return AUC.get_tree_full(user_id=user_id)
+
+
 def authorization_check(app_id,action,entity_id=''):
 
     user_id = get_current_user()
     current_app.logger.debug('Checking whether '+ str(user_id) +' is authorized to run '+ str(action) +' in app '+ str(app_id) + ' on entity '+ str(entity_id))
+    admin_actions = ('ListAllTree', 'ListAllPortfolio')
+    if action in admin_actions and user_id and _user_is_global_admin(user_id):
+        return {
+            "success": True,
+            "message": "Authorized (global admin)",
+            "status": 200,
+        }
     return {
             "success":True, 
             "message": "Authorized", 
@@ -267,12 +293,14 @@ def refresh_tree():
     current_app.logger.error(f"Refreshing tree")
     data = {}
     data['user_id'] = get_current_user()
-    response = AUC.get_tree_full(**data)
+    response = _build_auth_tree(data['user_id'])
 
     # Initialize S3 client and define bucket name and file path
     s3_client = boto3.client('s3')  # Ensure boto3 is imported
     bucket_name = current_app.config['S3_BUCKET_NAME']  
     file_path = f'auth/tree/{data["user_id"]}'
+    if response.get('success') and (response.get('document') or {}).get('is_global_admin'):
+        file_path = f'auth/tree/{data["user_id"]}_admin'
 
     # Store the new version in S3
     try:
@@ -299,12 +327,18 @@ def get_tree():
     
     data = {}
     data['user_id'] = get_current_user()
+    is_admin = _user_is_global_admin(data['user_id'])
 
     def _tree_response_from_db():
-        response = AUC.get_tree_full(**data)
+        response = _build_auth_tree(data['user_id'])
         if response.get('success'):
             return jsonify(response['document']), response['status']
         return jsonify(response), response['status']
+
+    # Global admins always rebuild from DB (full tenant list must not come from a stale S3 cache).
+    if is_admin:
+        current_app.logger.debug('Global admin: building tree from DynamoDB')
+        return _tree_response_from_db()
 
     # DynamoDB-only rebuild (optional). Use when debugging rel data or avoiding S3.
     force_db = os.environ.get('FORCE_TREE_FROM_DB', '').strip().lower() in ('1', 'true', 'yes')
@@ -332,7 +366,7 @@ def get_tree():
                 'S3 auth tree has no portfolios; rebuilding from DynamoDB for user %s',
                 data['user_id'],
             )
-            response = AUC.get_tree_full(**data)
+            response = _build_auth_tree(data['user_id'])
             if response.get('success'):
                 doc = response['document']
                 try:
@@ -348,7 +382,7 @@ def get_tree():
         return jsonify(document), 200
     except s3_client.exceptions.ClientError:
         current_app.logger.debug('Tree not found in s3, creating new one')
-        response = AUC.get_tree_full(**data)
+        response = _build_auth_tree(data['user_id'])
         if response.get('success') and response.get('document') is not None:
             try:
                 s3_client.put_object(
@@ -363,7 +397,7 @@ def get_tree():
         return jsonify(response), response['status']
     except Exception as e:
         current_app.logger.error(f"Unexpected error reading tree from S3 (falling back to DB): {str(e)}")
-        response = AUC.get_tree_full(**data)
+        response = _build_auth_tree(data['user_id'])
         if response.get('success'):
             return jsonify(response['document']), response['status']
         return jsonify(response), response['status']
