@@ -230,6 +230,33 @@ def handler_call(portfolio,org,extension,handler):
     return jsonify(response), 200
 
 
+# Handlers callable without Cognito — each validates its own credentials
+# (HMAC ops link, email selection token, etc.) inside the handler body.
+_PUBLIC_HANDLERS = frozenset({
+    ('noma', 'get_deferred_booking'),
+    ('noma', 'complete_deferred_booking'),
+    ('noma', 'select_flight_from_email'),
+})
+
+
+@app_schd.route('/<string:portfolio>/<string:org>/public/<string:extension>/<string:handler>', methods=['POST'])
+def public_handler_call(portfolio, org, extension, handler):
+    """Public handler entry point for ops links and email flows (no Cognito)."""
+    if (extension, handler) not in _PUBLIC_HANDLERS:
+        return jsonify({
+            'success': False,
+            'message': 'Handler not available on public route',
+        }), 404
+
+    current_app.logger.info('Public handler: %s/%s', extension, handler)
+    payload = request.get_json(silent=True) or {}
+    response = SHC.handler_call(portfolio, org, extension, handler, payload)
+
+    if not response.get('success'):
+        return jsonify(response), 400
+
+    return jsonify(response), 200
+
 
 # Direct subhandler runs
 @app_schd.route('/<string:portfolio>/<string:org>/call/<string:extension>/<string:handler>/<string:subhandler>',methods=['POST'])

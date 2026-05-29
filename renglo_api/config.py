@@ -67,7 +67,7 @@ def load_env_config(config_path=None):
         'CORS_ALLOWED_ORIGINS',
         'AGENT_API_OUTPUT', 'AGENT_API_HANDLER', 'EXTERNAL_HANDLERS',
         'OPENSEARCH_ENDPOINT', 'OPENSEARCH_INDEX', 'OPENSEARCH_REFRESH',
-        'SES_INVITE_SENDER',
+        'RESEND_API_KEY', 'INVITE_FROM',
     ]
     
     for key in env_var_keys:
