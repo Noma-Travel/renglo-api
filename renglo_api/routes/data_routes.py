@@ -18,6 +18,79 @@ app_data = Blueprint('app_data', __name__, template_folder='templates',url_prefi
 AUC = None
 DAC = None
 
+PAYMENT_METHODS_RING = "noma_payment_methods"
+
+
+def _get_renglo_config():
+    return getattr(current_app, "renglo_config", None) or current_app.config
+
+
+def _payment_crypto():
+    try:
+        from noma.utilities import payment_method_crypto as crypto
+        return crypto
+    except ImportError:
+        return None
+
+
+def _is_payment_methods_ring(ring: str) -> bool:
+    return ring == PAYMENT_METHODS_RING
+
+
+def _redact_payment_methods_payload(payload):
+    crypto = _payment_crypto()
+    if not crypto or not isinstance(payload, dict):
+        return payload
+    return crypto.redact_payment_methods_response(payload, config=_get_renglo_config())
+
+
+def _redact_payment_method_doc(doc):
+    crypto = _payment_crypto()
+    if not crypto or not isinstance(doc, dict):
+        return doc
+    return crypto.redact_payment_method_for_api(doc, config=_get_renglo_config())
+
+
+def _jsonify_ring_response(ring, document, status=200):
+    if _is_payment_methods_ring(ring):
+        if isinstance(document, dict) and (
+            "items" in document or "item" in document or document.get("success") is not None
+        ):
+            document = _redact_payment_methods_payload(document)
+        else:
+            document = _redact_payment_method_doc(document)
+    return jsonify(document), status
+
+
+def _prepare_payment_method_write(payload, *, action: str, existing_doc=None):
+    crypto = _payment_crypto()
+    if not crypto:
+        return payload, None, False
+
+    encrypted, err = crypto.prepare_payment_method_write_payload(
+        payload,
+        _get_renglo_config(),
+        action=action,
+        existing_doc=existing_doc,
+    )
+    if err:
+        return payload, err, False
+    return encrypted, None, crypto.needs_encrypted_sidecar(encrypted)
+
+
+def _persist_payment_method_sidecar(portfolio, org, pm_id, encrypted_doc, *, action: str):
+    crypto = _payment_crypto()
+    if not crypto:
+        return False, "Payment crypto module is not available"
+    return crypto.persist_payment_method_encrypted_sidecar(
+        DAC,
+        portfolio,
+        org,
+        pm_id,
+        encrypted_doc,
+        action=action,
+    )
+
 @app_data.record_once
 def on_load(state):
     """Initialize controllers with config when blueprint is registered."""
@@ -84,7 +157,7 @@ def route_a_b_get(portfolio, org, ring):
                 response = s3_client.get_object(Bucket=bucket_name, Key=file_path)
                 document = json.loads(response['Body'].read())
                 current_app.logger.debug('Document already exists, retrieving from S3')
-                return jsonify(document), 200
+                return _jsonify_ring_response(ring, document, 200)
         except (s3_client.exceptions.ClientError, Exception) as e:
             # If it does not exist or if we raised an exception, call DAC.get_a_b()
             current_app.logger.warning(
@@ -95,7 +168,7 @@ def route_a_b_get(portfolio, org, ring):
             try:
                 # Keep return shape consistent with the S3 document path.
                 refreshed, _status = DAC.refresh_s3_cache(portfolio, org, ring, sort)
-                return jsonify(refreshed), 200
+                return _jsonify_ring_response(ring, refreshed, 200)
             except Exception as refresh_error:
                 current_app.logger.exception(
                     'Failed to refresh cache for %s/%s/%s',
@@ -111,7 +184,7 @@ def route_a_b_get(portfolio, org, ring):
         
     else:
         response = DAC.get_a_b(portfolio, org, ring, limit, lastkey, sort)
-        return jsonify(response), 200  # Ensure a consistent JSON response
+        return _jsonify_ring_response(ring, response, 200)
     
 
 
@@ -130,7 +203,48 @@ def route_a_all_post(portfolio,ring):
 def route_a_b_post(portfolio,org,ring):
     
     payload = request.get_json()
-    response, status = DAC.post_a_b(portfolio,org,ring,payload)
+    encrypted_doc = payload
+    sidecar_needed = False
+
+    if _is_payment_methods_ring(ring):
+        encrypted_doc, encrypt_err, sidecar_needed = _prepare_payment_method_write(
+            payload,
+            action="post",
+        )
+        if encrypt_err:
+            return jsonify({
+                'success': False,
+                'message': 'Payment method encryption failed',
+                'error': encrypt_err,
+            }), 400
+
+    response, status = DAC.post_a_b(portfolio,org,ring,encrypted_doc)
+
+    if (
+        _is_payment_methods_ring(ring)
+        and status == 200
+        and isinstance(response, dict)
+        and response.get('success')
+    ):
+        if sidecar_needed:
+            item = response.get('item') or {}
+            pm_id = str(item.get('_id') or '').strip()
+            if pm_id:
+                ok, sidecar_err = _persist_payment_method_sidecar(
+                    portfolio,
+                    org,
+                    pm_id,
+                    encrypted_doc,
+                    action='post',
+                )
+                if not ok:
+                    return jsonify({
+                        'success': False,
+                        'message': 'Payment method saved but encrypted sidecar persist failed',
+                        'error': sidecar_err,
+                    }), 500
+        response = _redact_payment_methods_payload(response)
+
     DAC.refresh_s3_cache(portfolio, org, ring, None)
     return response, status
 
@@ -188,6 +302,8 @@ def route_a_b_query(portfolio, org, ring):
     }
        
     response = DAC.get_a_b_query(query)
+    if _is_payment_methods_ring(ring) and isinstance(response, dict):
+        response = _redact_payment_methods_payload(response)
     return response, 200
 
 
@@ -201,7 +317,10 @@ def route_a_b_c_get_with_slash(portfolio,org,ring,idx):
 @cognito_auth_required
 def route_a_b_c_get(portfolio,org,ring,idx):
 
-    return DAC.get_a_b_c(portfolio,org,ring,idx)
+    doc = DAC.get_a_b_c(portfolio,org,ring,idx)
+    if _is_payment_methods_ring(ring):
+        return _jsonify_ring_response(ring, doc, 200)
+    return doc
 
     
     
@@ -210,7 +329,53 @@ def route_a_b_c_get(portfolio,org,ring,idx):
 def route_a_b_c_put(portfolio,org,ring,idx):
     
     payload = request.get_json()
-    response, status = DAC.put_a_b_c(portfolio,org,ring,idx,payload)
+    encrypted_doc = payload
+    sidecar_needed = False
+
+    if _is_payment_methods_ring(ring):
+        existing_doc = DAC.get_a_b_c(portfolio, org, ring, idx)
+        if (
+            not isinstance(existing_doc, dict)
+            or existing_doc.get('error')
+            or existing_doc.get('success') is False
+        ):
+            existing_doc = None
+        encrypted_doc, encrypt_err, sidecar_needed = _prepare_payment_method_write(
+            payload,
+            action="put",
+            existing_doc=existing_doc,
+        )
+        if encrypt_err:
+            return jsonify({
+                'success': False,
+                'message': 'Payment method encryption failed',
+                'error': encrypt_err,
+            }), 400
+
+    response, status = DAC.put_a_b_c(portfolio,org,ring,idx,encrypted_doc)
+
+    if (
+        _is_payment_methods_ring(ring)
+        and status == 200
+        and isinstance(response, dict)
+        and response.get('success')
+    ):
+        if sidecar_needed:
+            ok, sidecar_err = _persist_payment_method_sidecar(
+                portfolio,
+                org,
+                idx,
+                encrypted_doc,
+                action='put',
+            )
+            if not ok:
+                return jsonify({
+                    'success': False,
+                    'message': 'Payment method updated but encrypted sidecar persist failed',
+                    'error': sidecar_err,
+                }), 500
+        response = _redact_payment_methods_payload(response)
+
     DAC.refresh_s3_cache(portfolio, org, ring, None)
     return response, status
 
