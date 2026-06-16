@@ -9,6 +9,7 @@ import boto3
 
 
 from renglo.auth.auth_controller import AuthController
+import renglo.auth.auth_controller as auth_module
 from flask_cognito import cognito_auth_required, current_user, current_cognito_jwt
 
 app_auth = Blueprint('app_auth', __name__, template_folder='templates',url_prefix='/_auth')
@@ -143,6 +144,31 @@ def validate_payload(payload,allowed_keys):
 #-------------------------------------------------ROUTES/USERS
 
 
+def _sync_invite_module_config():
+    """Invite hash generation relies on module-level config set during handler calls."""
+    config = current_app.renglo_config
+    auth_module.SECRET_KEY = config.get('SECRET_KEY', '')
+    auth_module.BASE_URL = (
+        config.get('BASE_URL')
+        or config.get('APP_FE_BASE_URL')
+        or config.get('FE_BASE_URL')
+        or ''
+    )
+    auth_module.WL_NAME = config.get('WL_NAME', 'Noma')
+
+
+@app_auth.route('/user/invite', methods=['GET'])
+def invite_user_get():
+    '''
+    Returns invite preview data (e.g. invitee name) for the accept-invite page.
+    '''
+    _sync_invite_module_config()
+    email = (request.args.get('email') or '').strip()
+    code = (request.args.get('code') or '').strip()
+    response = AUC.get_invite_preview(email, code)
+    return jsonify(response), response['status']
+
+
 @app_auth.route('/user/invite', methods=['POST'])
 @cognito_auth_required
 def invite_user_post():
@@ -183,15 +209,16 @@ def invite_user_put():
     '''
     Verifies that hash and email make a valid invitation 
     '''
-    payload = request.get_json()
-    # Check for minimum requirements
-    required_keys = ['code','email','first','last','pass'] 
+    _sync_invite_module_config()
+    payload = request.get_json() or {}
+    # first/last are optional — resolved from the attendant profile created at invite time
+    required_keys = ['code', 'email', 'pass']
     if not all(key in payload for key in required_keys):
-        return{
-            "success":False, 
-            "message": "Missing attributes", 
-            "status" :400
-            }
+        return jsonify({
+            "success": False,
+            "message": "Missing attributes",
+            "status": 400,
+        }), 400
 
     response = AUC.invite_create_user_funnel(**payload)
 
