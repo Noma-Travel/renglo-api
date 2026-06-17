@@ -233,6 +233,23 @@ def chat_messages(portfolio,org,entity_type,entity_id,thread_id):
     return response
 
 
+# Re-home a thread from one entity to another (e.g. dashboard travel-chat -> trip).
+# SAMPLE URL /_chat/<portfolio>/<org>/<entity_type>/<entity_id>/<thread_id>/move
+# INPUT: entity_id (source), thread_id, body {"new_entity_id": "<dest>"}
+# OUTPUT: {success, moved, from, to} — non-destructive, idempotent.
+@app_chat.route('<string:portfolio>/<string:org>/<string:entity_type>/<string:entity_id>/<string:thread_id>/move', methods=['POST'])
+@cognito_auth_required
+def chat_move_thread(portfolio, org, entity_type, entity_id, thread_id):
+    payload = request.get_json(silent=True) or {}
+    new_entity_id = (payload.get('new_entity_id') or '').strip()
+    if not new_entity_id:
+        return make_response(jsonify({'success': False, 'message': 'new_entity_id required'}), 400)
+
+    response = CHC.move_thread(portfolio, org, entity_type, entity_id, new_entity_id, thread_id)
+    code = 200 if response.get('success') else 500
+    return make_response(jsonify(response), code)
+
+
 # Get/post workspaces from a thread
 # A conversation thread is a short lived and focused exchange of messages around workspaces between an agent and a team, user or group of users.
 # SAMPLE URL https://<some_domain/_chat/<entity_type>/<entity_id>/<thread_id>
