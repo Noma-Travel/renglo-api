@@ -8,20 +8,23 @@ from renglo.schd.schd_controller import SchdController
 
 import time
 import random
+import hmac
 
 app_schd = Blueprint('app_scheduler', __name__, template_folder='templates',url_prefix='/_schd')
 
 # Controllers - will be initialized when blueprint is registered
 SHC = None
 BASE_URL = None
+WEBHOOK_SECRET = ''
 
 @app_schd.record_once
 def on_load(state):
     """Initialize controllers with config when blueprint is registered."""
-    global SHC, BASE_URL
+    global SHC, BASE_URL, WEBHOOK_SECRET
     config = state.app.renglo_config
     SHC = SchdController(config=config)
     BASE_URL = config.get('BASE_URL', '')
+    WEBHOOK_SECRET = (config.get('WHATSAPP_WEBHOOK_SECRET') or '').strip()
 
 
 
@@ -231,6 +234,48 @@ def handler_call(portfolio,org,extension,handler):
 
 
 
+# Handlers reachable on the unauthenticated /public/ route that authenticate
+# the caller via their OWN application-layer token (e.g. HMAC-signed links sent
+# to operators via Slack), and therefore do NOT need the webhook secret. Every
+# other handler on /public/ must present the shared WHATSAPP_WEBHOOK_SECRET.
+_SELF_AUTHENTICATING_PUBLIC_HANDLERS = {
+    'get_deferred_booking',
+    'complete_deferred_booking',
+}
+
+
+# Unauthenticated handler call. Two trusted-caller models share this route:
+#
+# 1. Machine-to-machine forwarders (e.g. the Next.js Twilio WhatsApp route) that
+#    have NO Cognito user/JWT but have validated the upstream provider signature.
+#    They prove trust by sending the shared secret WHATSAPP_WEBHOOK_SECRET in the
+#    JSON body as ``_webhook_secret``; we strip it before invoking the handler.
+# 2. Browser pages opening an HMAC-signed link (e.g. the ops page that completes
+#    a deferred booking). These carry no webhook secret but their handler gates
+#    access via its own signed token — listed in
+#    _SELF_AUTHENTICATING_PUBLIC_HANDLERS so it bypasses the secret check.
+#
+# Unlike /webhook/..., this preserves the JSON body so the caller can read
+# success/output. NOT for ordinary browser/user calls — use /call.
+@app_schd.route('/<string:portfolio>/<string:org>/public/<string:extension>/<string:handler>',methods=['POST'])
+def public_call(portfolio,org,extension,handler):
+
+    payload = request.get_json(silent=True) or {}
+    provided = str(payload.pop('_webhook_secret', '') or '').strip()
+    secret_ok = bool(WEBHOOK_SECRET) and hmac.compare_digest(provided, WEBHOOK_SECRET)
+    if not secret_ok and handler not in _SELF_AUTHENTICATING_PUBLIC_HANDLERS:
+        current_app.logger.warning('public_call rejected | %s/%s', extension, handler)
+        return jsonify({'success': False, 'error': 'Forbidden'}), 403
+
+    current_app.logger.info('Public running: '+extension+'/'+handler)
+    response = SHC.handler_call(portfolio,org,extension,handler,payload)
+
+    if not response.get('success'):
+        return jsonify(response), 400
+
+    return jsonify(response), 200
+
+
 # Direct subhandler runs
 @app_schd.route('/<string:portfolio>/<string:org>/call/<string:extension>/<string:handler>/<string:subhandler>',methods=['POST'])
 @cognito_auth_required
@@ -317,23 +362,5 @@ def webhook_call(portfolio,org,extension,handler):
 
 
     return '', 200  # Empty response with 200 status for Pub/Sub ACK
-
-
-
-# Unauthenticated handler call that DOES return the handler response as JSON.
-# Use for handlers that gate access via their own application-layer token
-# (e.g. HMAC-signed links sent to operators via Slack). Unlike /webhook/...,
-# this preserves the JSON body so the caller can read success/output.
-@app_schd.route('/<string:portfolio>/<string:org>/public/<string:extension>/<string:handler>',methods=['POST'])
-def public_call(portfolio,org,extension,handler):
-
-    current_app.logger.info('Public handler call: '+extension+'/'+handler)
-    payload = request.get_json()
-    response = SHC.handler_call(portfolio,org,extension,handler,payload)
-
-    if not response.get('success'):
-        return jsonify(response), 400
-
-    return jsonify(response), 200
 
 
