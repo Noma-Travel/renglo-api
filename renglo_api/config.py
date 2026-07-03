@@ -72,6 +72,7 @@ def load_env_config(config_path=None):
         'NEXT_PUBLIC_MS_CLIENT_SECRET', 'NEXT_PUBLIC_MS_REDIRECT_URI',
         'TOKENS_KMS_KEY_ID',
         'INVITE_FROM', 'SES_INVITE_SENDER',
+        'LANGFUSE_PUBLIC_KEY', 'LANGFUSE_SECRET_KEY', 'LANGFUSE_HOST', 'LANGFUSE_TRACING_ENABLED',
     ]
     
     for key in env_var_keys:
@@ -128,7 +129,8 @@ def get_config_for_lambda():
         'NEXT_PUBLIC_MS_TENANT_ID', 'NEXT_PUBLIC_MS_CLIENT_ID',
         'NEXT_PUBLIC_MS_CLIENT_SECRET', 'NEXT_PUBLIC_MS_REDIRECT_URI',
         'TOKENS_KMS_KEY_ID',
-        'AGENT_API_OUTPUT', 'AGENT_API_HANDLER', 'S3_BUCKET_NAME'
+        'AGENT_API_OUTPUT', 'AGENT_API_HANDLER', 'S3_BUCKET_NAME',
+        'LANGFUSE_PUBLIC_KEY', 'LANGFUSE_SECRET_KEY', 'LANGFUSE_HOST', 'LANGFUSE_TRACING_ENABLED',
     ]
     
     for key in env_var_keys:
