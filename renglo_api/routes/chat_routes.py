@@ -8,6 +8,7 @@ from renglo.agent.agent_controller import AgentController
 from renglo.auth.auth_controller import AuthController
 from renglo.data.data_controller import DataController
 from renglo.schd.schd_controller import SchdController
+from renglo_api.langfuse_tracing import trace_chat_request
 from functools import wraps
 import time
 import json
@@ -113,13 +114,16 @@ def real_time_message():
             return jsonify({'error': f'Missing required fields: {missing_fields}'}), 400
         
         
-        if 'core' in payload:
-            if payload['core'] == 'default' or payload['core'] == '':
+        # Wrap the agent dispatch so every nested OpenAI generation attaches to one
+        # enriched Langfuse trace (session/user/org). No-op when tracing is disabled.
+        with trace_chat_request(payload):
+            if 'core' in payload:
+                if payload['core'] == 'default' or payload['core'] == '':
+                    response = AGC.triage(payload)
+                else:
+                    response, status = SHC.direct_run(payload['core'],payload)
+            else:
                 response = AGC.triage(payload)
-            else:    
-                response, status = SHC.direct_run(payload['core'],payload)
-        else:
-            response = AGC.triage(payload)
         
         
         # Handle the case where response is a tuple (response, status)

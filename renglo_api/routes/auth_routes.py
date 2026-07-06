@@ -148,10 +148,11 @@ def _sync_invite_module_config():
     """Invite hash generation relies on module-level config set during handler calls."""
     config = current_app.renglo_config
     auth_module.SECRET_KEY = config.get('SECRET_KEY', '')
+    # Invite links must land on the frontend /invite page, not API Gateway.
     auth_module.BASE_URL = (
-        config.get('BASE_URL')
-        or config.get('APP_FE_BASE_URL')
-        or config.get('FE_BASE_URL')
+        (config.get('APP_FE_BASE_URL') or '').strip()
+        or (config.get('FE_BASE_URL') or '').strip()
+        or (config.get('BASE_URL') or '').strip()
         or ''
     )
     auth_module.WL_NAME = config.get('WL_NAME', 'Noma')
@@ -195,6 +196,8 @@ def invite_user_post():
     response_2 = authorization_check('_auth','inviteUser',entity_id = payload['team_id'])
     if not response_2['success']:
         return response_2
+    
+    _sync_invite_module_config()
     
     sender_id = get_current_user()
     response = AUC.invite_user(payload['email'],payload['team_id'],payload['portfolio_id'],sender_id)

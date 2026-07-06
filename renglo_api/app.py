@@ -22,6 +22,41 @@ def _is_aws_lambda_runtime() -> bool:
     return False
 
 
+def _bootstrap_langfuse(app: Flask) -> None:
+    """
+    Wire up Langfuse LLM tracing for the drop-in ``langfuse.openai`` wrapper.
+
+    1. Promote LANGFUSE_* config values into os.environ (the wrapper reads them from
+       there), without overriding vars already present in the real environment.
+    2. Register a per-request flush. Langfuse batches spans on a background thread;
+       on Lambda the runtime freezes between invocations, so unflushed events are
+       lost unless we flush before the response returns.
+
+    Fully no-op (and never raises) when Langfuse is not installed or not configured.
+    """
+    for key in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST",
+                "LANGFUSE_TRACING_ENABLED"):
+        val = app.config.get(key)
+        if val is not None and key not in os.environ:
+            os.environ[key] = str(val)
+
+    if not (os.environ.get("LANGFUSE_PUBLIC_KEY") and os.environ.get("LANGFUSE_SECRET_KEY")):
+        app.logger.info("Langfuse: no credentials configured — LLM tracing disabled")
+        return
+
+    app.logger.info("Langfuse: LLM tracing enabled (host=%s)",
+                    os.environ.get("LANGFUSE_HOST", "default"))
+
+    @app.teardown_appcontext
+    def _flush_langfuse(exc=None):  # noqa: ANN001 - Flask teardown signature
+        try:
+            from langfuse import get_client
+            get_client().flush()
+        except Exception:
+            # Never let observability break a request.
+            pass
+
+
 def _collect_allowed_cors_origins(app_config: dict) -> set[str]:
     """
     Build the set of browser origins that may call the API. Uses FE_BASE_URL,
@@ -164,7 +199,13 @@ def create_app(config=None, config_path=None):
     
     # Make config available for controller instantiation
     app.renglo_config = dict(app.config)
-    
+
+    # Langfuse LLM observability: the drop-in `langfuse.openai` wrapper reads its
+    # credentials from os.environ, but our config lives in app.config. Promote the
+    # keys into the environment (without clobbering anything already set) so every
+    # OpenAI client — in renglo-lib and every extension — is auto-traced.
+    _bootstrap_langfuse(app)
+
     # Setup cache
     cache = Cache(app)
     app.cache = cache
