@@ -49,6 +49,8 @@ def _bootstrap_langfuse(app: Flask) -> None:
 
     @app.teardown_appcontext
     def _flush_langfuse(exc=None):  # noqa: ANN001 - Flask teardown signature
+        if not getattr(g, "langfuse_dirty", False):
+            return
         try:
             from langfuse import get_client
             get_client().flush()
@@ -381,9 +383,16 @@ def run(host='0.0.0.0', port=5000, debug=True):
     """
     Convenience function to run the app for local development.
     """
-    app = create_app()
-    app.run(host=host, port=port, debug=debug)
+    application = create_app()
+    application.run(host=host, port=port, debug=debug)
 
 
-# For Zappa deployment - create app instance at module level
-app = create_app()
+_app_instance = None
+
+
+def get_app():
+    """Lazy singleton for imports that expect ``renglo_api.app.app``."""
+    global _app_instance
+    if _app_instance is None:
+        _app_instance = create_app()
+    return _app_instance
