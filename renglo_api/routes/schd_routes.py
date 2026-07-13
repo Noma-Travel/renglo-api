@@ -241,6 +241,7 @@ def handler_call(portfolio,org,extension,handler):
 _SELF_AUTHENTICATING_PUBLIC_HANDLERS = {
     'get_deferred_booking',
     'complete_deferred_booking',
+    'outlook_calendar_authorize_from_email',
 }
 
 

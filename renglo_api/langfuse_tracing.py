@@ -15,6 +15,8 @@ never break a chat request.
 import os
 from contextlib import contextmanager
 
+from flask import g, has_request_context
+
 
 def _tracing_enabled() -> bool:
     return bool(
@@ -55,6 +57,8 @@ def trace_chat_request(payload: dict):
         }
 
         trace_name = f"chat.{core}"
+        if has_request_context():
+            g.langfuse_dirty = True
         with lf.start_as_current_observation(as_type="span", name=trace_name) as span:
             span.update(input=payload.get("data"))
             with propagate_attributes(
