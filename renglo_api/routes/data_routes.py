@@ -19,6 +19,7 @@ AUC = None
 DAC = None
 
 PAYMENT_METHODS_RING = "noma_payment_methods"
+NOMA_TRAVELS_RING = "noma_travels"
 
 
 def _get_renglo_config():
@@ -31,6 +32,30 @@ def _payment_crypto():
         return crypto
     except ImportError:
         return None
+
+
+def _strip_noma_travels_approval_fields(payload):
+    """Drop client-writable purchase-approval fields on generic trip PUTs."""
+    try:
+        from noma.utilities.purchase_approval import strip_client_approval_fields
+        return strip_client_approval_fields(payload)
+    except ImportError:
+        # Fallback if noma package is unavailable in this process.
+        if not isinstance(payload, dict):
+            return payload
+        protected = {
+            "approval_status",
+            "approval_snapshot_hash",
+            "approval_requested_at",
+            "approval_requested_by",
+            "approval_previous_status",
+            "approval_decided_at",
+            "approval_decided_by",
+            "approved_by",
+            "approved_at",
+            "rejection_reason",
+        }
+        return {k: v for k, v in payload.items() if k not in protected}
 
 
 def _is_payment_methods_ring(ring: str) -> bool:
@@ -331,6 +356,11 @@ def route_a_b_c_put(portfolio,org,ring,idx):
     payload = request.get_json()
     encrypted_doc = payload
     sidecar_needed = False
+
+    if ring == NOMA_TRAVELS_RING:
+        # Travelers must not forge approval_status / snapshot via generic PUT.
+        # Server handlers (request/approve_purchase) call DAC.put_a_b_c directly.
+        encrypted_doc = _strip_noma_travels_approval_fields(encrypted_doc)
 
     if _is_payment_methods_ring(ring):
         existing_doc = DAC.get_a_b_c(portfolio, org, ring, idx)
