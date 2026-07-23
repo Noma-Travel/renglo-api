@@ -231,10 +231,29 @@ def chat_messages(portfolio,org,entity_type,entity_id,thread_id):
     # Authorization validation should be implemented here. Check if token is authorized to access portfolio/org
     
     if request.method == 'GET':
+        # Hide turns before this thread's context-reset cutoff so the UI shows
+        # exactly what the agent sees (same marker, same list_turns filter) and
+        # a reload after "clear chat" stays cleared. None = never reset = all
+        # turns, i.e. the pre-reset behavior.
+        since = CHC.get_context_reset_since(portfolio, org, entity_type, entity_id, thread_id)
         # resolve=True: inline tmp artifacts for UI; agent/triage code must use CHC.list_turns(..., False)
-        response = CHC.list_turns(portfolio, org, entity_type, entity_id, thread_id, True)
+        response = CHC.list_turns(portfolio, org, entity_type, entity_id, thread_id, True, since=since)
 
     return response
+
+
+# Remove a thread from the user's conversation list (metadata row only).
+# SAMPLE URL /_chat/<portfolio>/<org>/<entity_type>/<entity_id>/<thread_id>/delete
+# INPUT: entity_id (user container, e.g. {org}-u:{user}), thread_id
+# OUTPUT: {success, deleted, thread_id} — does not delete trips or message turns.
+# POST (not DELETE) so CORS preflight matches the same pattern as /move and
+# /reset-context — a bare DELETE route was returning OPTIONS 404 in local.
+@app_chat.route('<string:portfolio>/<string:org>/<string:entity_type>/<string:entity_id>/<string:thread_id>/delete', methods=['POST'])
+@cognito_auth_required
+def chat_delete_thread(portfolio, org, entity_type, entity_id, thread_id):
+    response = CHC.delete_thread(portfolio, org, entity_type, entity_id, thread_id)
+    code = 200 if response.get('success') else (response.get('status') or 500)
+    return make_response(jsonify(response), code)
 
 
 # Re-home a thread from one entity to another (e.g. dashboard travel-chat -> trip).
@@ -250,6 +269,22 @@ def chat_move_thread(portfolio, org, entity_type, entity_id, thread_id):
         return make_response(jsonify({'success': False, 'message': 'new_entity_id required'}), 400)
 
     response = CHC.move_thread(portfolio, org, entity_type, entity_id, new_entity_id, thread_id)
+    code = 200 if response.get('success') else 500
+    return make_response(jsonify(response), code)
+
+
+# Zero ONE thread's conversation context ("clear chat") without deleting anything.
+# SAMPLE URL /_chat/<portfolio>/<org>/<entity_type>/<entity_id>/<thread_id>/reset-context
+# INPUT: entity_id (the thread's conv key, {org}-{thread}), thread_id
+# OUTPUT: {success, since, thread_id, workspace_id}
+# The turns stay in the database — a cutoff marker in the thread's workspace
+# hides the earlier ones from both the agent and the UI, so this is reversible.
+# The trip pointer (irn:active_trip) is deliberately preserved: clearing the
+# chat must never unlink the trip.
+@app_chat.route('<string:portfolio>/<string:org>/<string:entity_type>/<string:entity_id>/<string:thread_id>/reset-context', methods=['POST'])
+@cognito_auth_required
+def chat_reset_context(portfolio, org, entity_type, entity_id, thread_id):
+    response = CHC.reset_thread_context(portfolio, org, entity_type, entity_id, thread_id)
     code = 200 if response.get('success') else 500
     return make_response(jsonify(response), code)
 
