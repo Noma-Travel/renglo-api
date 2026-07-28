@@ -34,6 +34,25 @@ def _payment_crypto():
         return None
 
 
+def _payment_authz():
+    try:
+        from noma.utilities import payment_method_authz as pma
+        return pma
+    except ImportError:
+        return None
+
+
+def _resolve_payment_caller(portfolio, org):
+    pma = _payment_authz()
+    if not pma:
+        return None
+    return pma.resolve_payment_caller(DAC, AUC, _get_renglo_config(), portfolio, org)
+
+
+def _forbid(message="Forbidden"):
+    return jsonify({"success": False, "message": message}), 403
+
+
 def _strip_noma_travels_approval_fields(payload):
     """Drop client-writable purchase-approval fields on generic trip PUTs."""
     try:
@@ -62,6 +81,19 @@ def _is_payment_methods_ring(ring: str) -> bool:
     return ring == PAYMENT_METHODS_RING
 
 
+def _apply_payment_list_authz(portfolio, org, document):
+    caller = _resolve_payment_caller(portfolio, org)
+    pma = _payment_authz()
+    if not caller or not pma:
+        return document
+    return pma.filter_payment_methods_payload(
+        document,
+        role=caller.get("role"),
+        caller_ids=caller.get("caller_ids"),
+        managed_ids=caller.get("managed_ids"),
+    )
+
+
 def _redact_payment_methods_payload(payload):
     crypto = _payment_crypto()
     if not crypto or not isinstance(payload, dict):
@@ -76,8 +108,10 @@ def _redact_payment_method_doc(doc):
     return crypto.redact_payment_method_for_api(doc, config=_get_renglo_config())
 
 
-def _jsonify_ring_response(ring, document, status=200):
+def _jsonify_ring_response(ring, document, status=200, portfolio=None, org=None):
     if _is_payment_methods_ring(ring):
+        if portfolio and org and isinstance(document, dict) and "items" in document:
+            document = _apply_payment_list_authz(portfolio, org, document)
         if isinstance(document, dict) and (
             "items" in document or "item" in document or document.get("success") is not None
         ):
@@ -182,7 +216,7 @@ def route_a_b_get(portfolio, org, ring):
                 response = s3_client.get_object(Bucket=bucket_name, Key=file_path)
                 document = json.loads(response['Body'].read())
                 current_app.logger.debug('Document already exists, retrieving from S3')
-                return _jsonify_ring_response(ring, document, 200)
+                return _jsonify_ring_response(ring, document, 200, portfolio=portfolio, org=org)
         except (s3_client.exceptions.ClientError, Exception) as e:
             # If it does not exist or if we raised an exception, call DAC.get_a_b()
             current_app.logger.warning(
@@ -193,7 +227,7 @@ def route_a_b_get(portfolio, org, ring):
             try:
                 # Keep return shape consistent with the S3 document path.
                 refreshed, _status = DAC.refresh_s3_cache(portfolio, org, ring, sort)
-                return _jsonify_ring_response(ring, refreshed, 200)
+                return _jsonify_ring_response(ring, refreshed, 200, portfolio=portfolio, org=org)
             except Exception as refresh_error:
                 current_app.logger.exception(
                     'Failed to refresh cache for %s/%s/%s',
@@ -209,7 +243,7 @@ def route_a_b_get(portfolio, org, ring):
         
     else:
         response = DAC.get_a_b(portfolio, org, ring, limit, lastkey, sort)
-        return _jsonify_ring_response(ring, response, 200)
+        return _jsonify_ring_response(ring, response, 200, portfolio=portfolio, org=org)
     
 
 
@@ -232,6 +266,21 @@ def route_a_b_post(portfolio,org,ring):
     sidecar_needed = False
 
     if _is_payment_methods_ring(ring):
+        caller = _resolve_payment_caller(portfolio, org)
+        pma = _payment_authz()
+        if caller and pma:
+            normalized, authz_err = pma.prepare_payment_method_authz_write(
+                payload,
+                role=caller.get("role"),
+                caller_ids=caller.get("caller_ids"),
+                managed_ids=caller.get("managed_ids"),
+                user_id=caller.get("user_id"),
+                action="post",
+            )
+            if authz_err:
+                status = 403 if "Forbidden" in authz_err else 400
+                return jsonify({"success": False, "message": authz_err}), status
+            payload = normalized
         encrypted_doc, encrypt_err, sidecar_needed = _prepare_payment_method_write(
             payload,
             action="post",
@@ -328,6 +377,7 @@ def route_a_b_query(portfolio, org, ring):
        
     response = DAC.get_a_b_query(query)
     if _is_payment_methods_ring(ring) and isinstance(response, dict):
+        response = _apply_payment_list_authz(portfolio, org, response)
         response = _redact_payment_methods_payload(response)
     return response, 200
 
@@ -344,7 +394,19 @@ def route_a_b_c_get(portfolio,org,ring,idx):
 
     doc = DAC.get_a_b_c(portfolio,org,ring,idx)
     if _is_payment_methods_ring(ring):
-        return _jsonify_ring_response(ring, doc, 200)
+        caller = _resolve_payment_caller(portfolio, org)
+        pma = _payment_authz()
+        if caller and pma:
+            allowed, err = pma.gate_payment_method_doc(
+                doc,
+                role=caller.get("role"),
+                caller_ids=caller.get("caller_ids"),
+                managed_ids=caller.get("managed_ids"),
+                mutate=False,
+            )
+            if not allowed:
+                return _forbid(err or "Forbidden")
+        return _jsonify_ring_response(ring, doc, 200, portfolio=portfolio, org=org)
     return doc
 
     
@@ -370,6 +432,22 @@ def route_a_b_c_put(portfolio,org,ring,idx):
             or existing_doc.get('success') is False
         ):
             existing_doc = None
+        caller = _resolve_payment_caller(portfolio, org)
+        pma = _payment_authz()
+        if caller and pma:
+            normalized, authz_err = pma.prepare_payment_method_authz_write(
+                payload,
+                role=caller.get("role"),
+                caller_ids=caller.get("caller_ids"),
+                managed_ids=caller.get("managed_ids"),
+                user_id=caller.get("user_id"),
+                existing_doc=existing_doc,
+                action="put",
+            )
+            if authz_err:
+                status = 403 if "Forbidden" in authz_err else 400
+                return jsonify({"success": False, "message": authz_err}), status
+            payload = normalized
         encrypted_doc, encrypt_err, sidecar_needed = _prepare_payment_method_write(
             payload,
             action="put",
@@ -413,6 +491,21 @@ def route_a_b_c_put(portfolio,org,ring,idx):
 @app_data.route('/<string:portfolio>/<string:org>/<string:ring>/<string:idx>', methods=['DELETE'])
 @cognito_auth_required
 def route_a_b_c_delete(portfolio,org,ring,idx):
+
+    if _is_payment_methods_ring(ring):
+        existing_doc = DAC.get_a_b_c(portfolio, org, ring, idx)
+        caller = _resolve_payment_caller(portfolio, org)
+        pma = _payment_authz()
+        if caller and pma:
+            allowed, err = pma.gate_payment_method_doc(
+                existing_doc,
+                role=caller.get("role"),
+                caller_ids=caller.get("caller_ids"),
+                managed_ids=caller.get("managed_ids"),
+                mutate=True,
+            )
+            if not allowed:
+                return _forbid(err or "Forbidden")
 
     response, status = DAC.delete_a_b_c(portfolio,org,ring,idx)
     DAC.refresh_s3_cache(portfolio, org, ring, None)
