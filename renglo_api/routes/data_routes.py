@@ -54,7 +54,7 @@ def _forbid(message="Forbidden"):
 
 
 def _strip_noma_travels_approval_fields(payload):
-    """Drop client-writable purchase-approval fields on generic trip PUTs."""
+    """Drop client-writable purchase-approval fields on generic trip POST/PUT."""
     try:
         from noma.utilities.purchase_approval import strip_client_approval_fields
         return strip_client_approval_fields(payload)
@@ -252,6 +252,9 @@ def route_a_b_get(portfolio, org, ring):
 def route_a_all_post(portfolio,ring):
     
     payload = request.get_json()
+    if ring == NOMA_TRAVELS_RING:
+        # Same forge protection as PUT — clients must not create trips pre-approved.
+        payload = _strip_noma_travels_approval_fields(payload)
     response, status = DAC.post_a_b(portfolio,'_all',ring,payload)
     DAC.refresh_s3_cache(portfolio, '_all', ring, None)
     return response, status
@@ -264,6 +267,11 @@ def route_a_b_post(portfolio,org,ring):
     payload = request.get_json()
     encrypted_doc = payload
     sidecar_needed = False
+
+    if ring == NOMA_TRAVELS_RING:
+        # Travelers must not forge approval_status / snapshot via generic POST create.
+        # Server handlers (request/approve_purchase) call DAC.put_a_b_c directly.
+        encrypted_doc = _strip_noma_travels_approval_fields(encrypted_doc)
 
     if _is_payment_methods_ring(ring):
         caller = _resolve_payment_caller(portfolio, org)
