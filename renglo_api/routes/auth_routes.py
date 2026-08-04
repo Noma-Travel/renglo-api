@@ -55,7 +55,19 @@ def _cognito_groups():
 
 
 def _user_is_global_admin(user_id):
-    return AUC.is_global_admin(cognito_groups=_cognito_groups(), user_id=user_id)
+    email = (current_cognito_jwt.get('email') or '').strip().lower()
+    if not email:
+        # Access tokens often omit email; username is frequently the email.
+        for key in ('username', 'cognito:username'):
+            raw = (current_cognito_jwt.get(key) or '').strip().lower()
+            if '@' in raw:
+                email = raw
+                break
+    return AUC.is_global_admin(
+        cognito_groups=_cognito_groups(),
+        user_id=user_id,
+        email=email or None,
+    )
 
 
 def _build_auth_tree(user_id):
@@ -310,6 +322,70 @@ def update_user():
     response = AUC.update_entity(type,**data)
     return jsonify(response), response['status']
 
+
+@app_auth.route('/user', methods=['DELETE'])
+@cognito_auth_required
+def delete_user():
+    '''
+    AdminDeleteUser in Cognito so the email can be re-invited / re-signed-up.
+
+    Body (optional): { "email": "<target>" }
+    - Omitting email (or matching the caller) → self-delete
+    - Other email → allowed for global/system admins only
+    '''
+    body = request.get_json(silent=True) or {}
+    target_email = str(body.get('email') or '').strip().lower()
+
+    caller_email = str(current_cognito_jwt.get('email') or '').strip().lower()
+    if not caller_email:
+        for key in ('username', 'cognito:username'):
+            raw = str(current_cognito_jwt.get(key) or '').strip().lower()
+            if '@' in raw:
+                caller_email = raw
+                break
+
+    if not target_email:
+        target_email = caller_email
+
+    if not target_email or '@' not in target_email:
+        return jsonify({
+            'success': False,
+            'message': 'email is required',
+            'status': 400,
+        }), 400
+
+    caller_id = get_current_user()
+    is_self = bool(caller_email) and target_email == caller_email
+
+    if not is_self and not _user_is_global_admin(caller_id):
+        return jsonify({
+            'success': False,
+            'message': 'Only a system/global admin can delete another user login',
+            'status': 403,
+        }), 403
+
+    # Also remove Dynamo user entity when we can resolve it.
+    user_resp = AUC.get_user_id(target_email)
+    if user_resp.get('success'):
+        target_user_id = (user_resp.get('document') or {}).get('user_id')
+        if target_user_id:
+            entity = AUC.get_entity('user', user_id=target_user_id)
+            if entity.get('success') and entity.get('document'):
+                doc = entity['document']
+                AUC.AUM.delete_entity(
+                    index=doc.get('index') or 'irn:entity:user:*',
+                    _id=doc.get('_id') or target_user_id,
+                )
+
+    cognito = AUC.AUM.cognito_user_delete(target_email)
+    ok = bool(cognito.get('success'))
+    status = cognito.get('status') or (200 if ok else 400)
+    return jsonify({
+        'success': ok,
+        'message': cognito.get('message') or ('Deleted' if ok else 'Failed'),
+        'document': cognito.get('document'),
+        'status': status,
+    }), status
 
 
 #-------------------------------------------------ROUTES/PORTFOLIOS
