@@ -24,7 +24,14 @@ def on_load(state):
     config = state.app.renglo_config
     SHC = SchdController(config=config)
     BASE_URL = config.get('BASE_URL', '')
-    WEBHOOK_SECRET = (config.get('WHATSAPP_WEBHOOK_SECRET') or '').strip()
+    # Prefer config; fall back to process env (Lambda) in case the key was
+    # added to the function env before it was allowlisted in load_env_config.
+    import os as _os
+    WEBHOOK_SECRET = (
+        config.get('WHATSAPP_WEBHOOK_SECRET')
+        or _os.environ.get('WHATSAPP_WEBHOOK_SECRET')
+        or ''
+    ).strip()
 
 
 
