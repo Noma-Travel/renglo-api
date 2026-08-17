@@ -20,6 +20,13 @@ DAC = None
 
 PAYMENT_METHODS_RING = "noma_payment_methods"
 NOMA_TRAVELS_RING = "noma_travels"
+TRIP_PROCESS_SIDECAR_RINGS = frozenset(
+    {
+        "noma_trip_payments",
+        "noma_trip_ops_bookings",
+        "noma_trip_calendar",
+    }
+)
 
 
 def _get_renglo_config():
@@ -54,27 +61,40 @@ def _forbid(message="Forbidden"):
 
 
 def _strip_noma_travels_approval_fields(payload):
-    """Drop client-writable purchase-approval fields on generic trip POST/PUT."""
+    """Drop client-writable purchase-approval / process fields on generic trip POST/PUT."""
     try:
-        from noma.utilities.purchase_approval import strip_client_approval_fields
-        return strip_client_approval_fields(payload)
+        from noma.utilities.trip_process import strip_client_process_fields
+        return strip_client_process_fields(payload)
     except ImportError:
-        # Fallback if noma package is unavailable in this process.
-        if not isinstance(payload, dict):
-            return payload
-        protected = {
-            "approval_status",
-            "approval_snapshot_hash",
-            "approval_requested_at",
-            "approval_requested_by",
-            "approval_previous_status",
-            "approval_decided_at",
-            "approval_decided_by",
-            "approved_by",
-            "approved_at",
-            "rejection_reason",
-        }
-        return {k: v for k, v in payload.items() if k not in protected}
+        try:
+            from noma.utilities.purchase_approval import strip_client_approval_fields
+            return strip_client_approval_fields(payload)
+        except ImportError:
+            if not isinstance(payload, dict):
+                return payload
+            protected = {
+                "approval",
+                "payment_id",
+                "ops_booking_id",
+                "calendar_id",
+                "approval_status",
+                "approval_snapshot_hash",
+                "approval_requested_at",
+                "approval_requested_by",
+                "approval_previous_status",
+                "approval_decided_at",
+                "approval_decided_by",
+                "approved_by",
+                "approved_at",
+                "rejection_reason",
+            }
+            return {k: v for k, v in payload.items() if k not in protected}
+
+
+def _forbid_trip_process_sidecar(ring: str):
+    if ring in TRIP_PROCESS_SIDECAR_RINGS:
+        return _forbid("Trip process sidecars are not writable via the generic data API")
+    return None
 
 
 def _is_payment_methods_ring(ring: str) -> bool:
@@ -250,7 +270,10 @@ def route_a_b_get(portfolio, org, ring):
 @app_data.route('/<string:portfolio>/_all/<string:ring>', methods=['POST'])
 @cognito_auth_required
 def route_a_all_post(portfolio,ring):
-    
+    blocked = _forbid_trip_process_sidecar(ring)
+    if blocked:
+        return blocked
+
     payload = request.get_json()
     if ring == NOMA_TRAVELS_RING:
         # Same forge protection as PUT — clients must not create trips pre-approved.
@@ -263,7 +286,10 @@ def route_a_all_post(portfolio,ring):
 @app_data.route('/<string:portfolio>/<string:org>/<string:ring>', methods=['POST'])
 @cognito_auth_required
 def route_a_b_post(portfolio,org,ring):
-    
+    blocked = _forbid_trip_process_sidecar(ring)
+    if blocked:
+        return blocked
+
     payload = request.get_json()
     encrypted_doc = payload
     sidecar_needed = False
@@ -422,7 +448,10 @@ def route_a_b_c_get(portfolio,org,ring,idx):
 @app_data.route('/<string:portfolio>/<string:org>/<string:ring>/<string:idx>', methods=['PUT'])
 @cognito_auth_required
 def route_a_b_c_put(portfolio,org,ring,idx):
-    
+    blocked = _forbid_trip_process_sidecar(ring)
+    if blocked:
+        return blocked
+
     payload = request.get_json()
     encrypted_doc = payload
     sidecar_needed = False
