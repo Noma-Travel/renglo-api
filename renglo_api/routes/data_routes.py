@@ -279,7 +279,10 @@ def route_a_all_post(portfolio,ring):
         # Same forge protection as PUT — clients must not create trips pre-approved.
         payload = _strip_noma_travels_approval_fields(payload)
     response, status = DAC.post_a_b(portfolio,'_all',ring,payload)
-    DAC.refresh_s3_cache(portfolio, '_all', ring, None)
+    # Drop the snapshot instead of rebuilding it: refresh_s3_cache pages the whole
+    # ring out of DynamoDB, so writes would scale with tenant size. The GET above
+    # regenerates it on the next uncached read.
+    DAC.invalidate_s3_cache(portfolio, '_all', ring, None)
     return response, status
     
 
@@ -353,7 +356,7 @@ def route_a_b_post(portfolio,org,ring):
                     }), 500
         response = _redact_payment_methods_payload(response)
 
-    DAC.refresh_s3_cache(portfolio, org, ring, None)
+    DAC.invalidate_s3_cache(portfolio, org, ring, None)
     return response, status
 
 
@@ -521,10 +524,10 @@ def route_a_b_c_put(portfolio,org,ring,idx):
                 }), 500
         response = _redact_payment_methods_payload(response)
 
-    DAC.refresh_s3_cache(portfolio, org, ring, None)
+    DAC.invalidate_s3_cache(portfolio, org, ring, None)
     return response, status
 
-    
+
 @app_data.route('/<string:portfolio>/<string:org>/<string:ring>/<string:idx>', methods=['DELETE'])
 @cognito_auth_required
 def route_a_b_c_delete(portfolio,org,ring,idx):
@@ -545,7 +548,7 @@ def route_a_b_c_delete(portfolio,org,ring,idx):
                 return _forbid(err or "Forbidden")
 
     response, status = DAC.delete_a_b_c(portfolio,org,ring,idx)
-    DAC.refresh_s3_cache(portfolio, org, ring, None)
+    DAC.invalidate_s3_cache(portfolio, org, ring, None)
     return response, status
 
 

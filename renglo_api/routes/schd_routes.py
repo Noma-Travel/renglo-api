@@ -9,8 +9,51 @@ from renglo.schd.schd_controller import SchdController
 import time
 import random
 import hmac
+import hashlib
 
 app_schd = Blueprint('app_scheduler', __name__, template_folder='templates',url_prefix='/_schd')
+
+# Handlers whose /call response is a pure read. POST is only the transport here,
+# so answering an unchanged read with 304 is safe and skips re-sending the whole
+# document across the wire — the API runs in us-east-1 while most users are in
+# Brazil, so a repeat trip payload costs a full RTT plus the body.
+#
+# Only ever add handlers with no side effects: a 304 means the caller keeps the
+# body it already has, which would silently swallow any state change.
+ETAG_READONLY_HANDLERS = frozenset({
+    'get_trip',
+    'get_trips',
+    'get_reminders',
+    'whoami',
+})
+
+
+def _weak_etag(payload_bytes):
+    """Stable entity tag for a serialized response body."""
+    return '"' + hashlib.md5(payload_bytes).hexdigest() + '"'
+
+
+def _slim_readonly_response(response):
+    """
+    Drop the debugging carbon copies from a read-only handler response.
+
+    SchdController.handler_call returns the payload twice: once unwrapped in
+    'output', and again inside 'stack' (the raw load_and_run result, which still
+    holds the handler's own 'output'). It also echoes the request in 'input'.
+    For a trip read that means sending the document twice over the us-east-1 ->
+    Brazil hop, which is the exact cost the ETag below exists to avoid.
+
+    Dropping them also stabilizes the ETag: 'stack' is the least predictable part
+    of the body, so anything non-deterministic in it would change the hash on
+    every call and the 304 would never fire.
+
+    Only applied to ETAG_READONLY_HANDLERS, whose callers read 'output' alone.
+    """
+    return {
+        key: value
+        for key, value in response.items()
+        if key not in ('stack', 'input')
+    }
 
 # Controllers - will be initialized when blueprint is registered
 SHC = None
@@ -231,13 +274,26 @@ def direct_run(extension,handler):
 def handler_call(portfolio,org,extension,handler):
     
     current_app.logger.info('Running: '+extension+'/'+handler)
-    payload = request.get_json() 
+    payload = request.get_json()
     response = SHC.handler_call(portfolio,org,extension,handler,payload)
-    
+
     if not response['success']:
         return jsonify(response), 400
-    
-    return jsonify(response), 200
+
+    if handler in ETAG_READONLY_HANDLERS:
+        response = _slim_readonly_response(response)
+
+    result = jsonify(response)
+
+    # Conditional GET semantics over a POST transport: the handler still runs
+    # (we hash its output), so this saves transfer, not compute.
+    if handler in ETAG_READONLY_HANDLERS:
+        etag = _weak_etag(result.get_data())
+        if request.headers.get('If-None-Match') == etag:
+            return '', 304, {'ETag': etag}
+        result.headers['ETag'] = etag
+
+    return result, 200
 
 
 

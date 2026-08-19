@@ -92,9 +92,13 @@ def _install_cors_wsgi_middleware(app: Flask, allowed: frozenset[str]) -> None:
         return
 
     parent = app.wsgi_app
+    # If-None-Match is not a CORS-safelisted request header: without it here, a
+    # browser revalidating a resource that carries an ETag fails preflight and
+    # the whole request dies with a CORS error, not a 304.
     allow_headers = (
         "Content-Type, Authorization, Accept, X-Api-Key, X-Amz-Date, X-Amz-Security-Token, "
-        "X-Org-Id, X-Portfolio-Id, X-Requested-With, Cache-Control, Pragma, Expires, Origin"
+        "X-Org-Id, X-Portfolio-Id, X-Requested-With, Cache-Control, Pragma, Expires, Origin, "
+        "If-None-Match"
     )
 
     def wsgi_with_cors(environ, start_response):
@@ -152,12 +156,7 @@ def _install_cors_wsgi_middleware(app: Flask, allowed: frozenset[str]) -> None:
                     "GET, POST, PUT, DELETE, PATCH, OPTIONS",
                 )
             )
-            h.append(
-                (
-                    "Access-Control-Allow-Headers",
-                    "Content-Type, Authorization, Accept, X-Api-Key, X-Amz-Date, X-Amz-Security-Token, X-Org-Id, X-Portfolio-Id, X-Requested-With, Cache-Control, Pragma, Expires, Origin",
-                )
-            )
+            h.append(("Access-Control-Allow-Headers", allow_headers))
             h.append(("Access-Control-Expose-Headers", "*"))
             return start_response(status, h, exc_info)
 
@@ -315,7 +314,18 @@ def create_app(config=None, config_path=None):
     _register_alias(app_chat, '/chat')
     _register_alias(app_state, '/state')
     _register_alias(app_session, '/session')
-    
+
+    # Product API routes shipped by an installed extension. Generic hook: the
+    # platform does not know what /v1 contains, only that an extension may offer
+    # one. Same lazy, degrade-if-absent pattern data_routes.py uses to reach
+    # noma.utilities — the API must still boot without the extension installed.
+    try:
+        from noma.api import register as _register_noma_api
+    except ImportError:
+        app.logger.info('noma.api not installed; product API routes disabled')
+    else:
+        _register_noma_api(app)
+
     # Template Filters
     @app.template_filter()
     def diablify(string):
